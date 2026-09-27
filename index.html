@@ -4607,6 +4607,7 @@ const FIELD = [
   { id: 'medkit', name: 'Field medkit', price: 80, blurb: 'Heals you and your squad to full.' },
 ];
 let holes = [];
+let flyQ = 0, flyWarned = false;
 
 const MOUTH0 = 78, MOUTH1 = 118, TERR_W = 110, TERR_L = 400;
 function plainH(x, z) {
@@ -4868,7 +4869,7 @@ try { const v = localStorage.getItem('htl_gfx'); if (v !== null && v !== '') { q
 // ======================= textures =======================
 let A = {};
 const TX = {};
-const AV = '67e8281c';
+const AV = 'a43a1ccb';
 function loadImg(src) {
   return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error(src)); i.src = src + '?v=' + AV; });
 }
@@ -6338,6 +6339,182 @@ function bugGeometry(lo = false) {
   parts.push(t1, t2);
   return merge(parts);
 }
+// ======================= fliers: spitters =======================
+// a slender wasp-like body: narrow thorax, long head with a downturned proboscis, a swollen acid sac at the back
+// that carries the glow, four dangling legs. Wings are a separate instanced plane so they can flap.
+const MAX_FLY = 16, MAX_GLOB = 24;
+let flyBody, flyEyes, flyWings, globMesh;
+function flierGeometry() {
+  const dark = lin('#040506'), base = lin('#0b0e11'), hi = lin('#1c2329'), sac = lin('#0a1a17');
+  const shade = (top, bot) => (x, y, z, ny) => _c.copy(bot).lerp(top, clamp(ny * 0.5 + 0.5, 0, 1)).clone();
+  const none = () => 0;
+  const parts = [];
+  // thorax
+  const th = vglow(xf(new T.SphereGeometry(1, 14, 10), [0.1, 0, 0], null, [0.42, 0.3, 0.3]), none); vcolor(th, shade(hi, dark)); parts.push(th);
+  // head, tilted down, with the proboscis
+  const hd = vglow(xf(new T.SphereGeometry(1, 14, 10), [0.62, -0.06, 0], [0, 0, -0.3], [0.32, 0.24, 0.26]), none); vcolor(hd, shade(base, dark)); parts.push(hd);
+  const pb = vglow(xf(new T.ConeGeometry(0.05, 0.5, 7), [0.86, -0.3, 0], [0, 0, 2.2]), (x, y) => 0.4); vcolor(pb, solid('#060809')); parts.push(pb);
+  // acid sac: a long teardrop abdomen hanging back and down, glowing through the chitin
+  const ab = new T.SphereGeometry(1, 22, 14), p = ab.attributes.position, cols = new Float32Array(p.count * 3), glow = new Float32Array(p.count), gpos = new Float32Array(p.count * 3);
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const taper = 1 - 0.35 * Math.max(0, -x);
+    p.setXYZ(i, x * 0.72, y * 0.3 * taper, z * 0.32 * taper);
+    const band = (x + 1) * 3.2, f = band - Math.floor(band), groove = sstep(0.82, 0.9, f) * (1 - sstep(0.94, 0.99, f));
+    const top = clamp(y * 0.5 + 0.5, 0, 1);
+    _c.copy(sac).lerp(base, top * 0.6); if (top > 0.7) _c.lerp(hi, (top - 0.7) * 1.4);
+    cols[i * 3] = _c.r; cols[i * 3 + 1] = _c.g; cols[i * 3 + 2] = _c.b;
+    gpos[i * 3] = x; gpos[i * 3 + 1] = y; gpos[i * 3 + 2] = z;
+    glow[i] = (1 - top) * 0.32 + groove * 0.75;
+  }
+  ab.setAttribute('color', new T.BufferAttribute(cols, 3)); ab.setAttribute('glow', new T.BufferAttribute(glow, 1)); ab.setAttribute('gpos', new T.BufferAttribute(gpos, 3)); ab.computeVertexNormals();
+  xf(ab, [-0.62, -0.14, 0], [0, 0, 0.32]); parts.push(ab);
+  // stinger and dorsal spines
+  const st = vglow(xf(new T.ConeGeometry(0.05, 0.36, 6), [-1.3, -0.42, 0], [0, 0, Math.PI / 2 + 0.5]), (x, y) => 0.6); vcolor(st, solid('#05070a')); parts.push(st);
+  for (const [x, y, sc] of [[0.2, 0.26, 0.6], [-0.05, 0.28, 0.8], [-0.35, 0.22, 0.9], [-0.65, 0.12, 0.8]]) {
+    const c = vglow(xf(new T.ConeGeometry(0.05 * sc, 0.3 * sc, 6), [x, y, 0], [0, 0, 0.45]), none); vcolor(c, solid('#070a0d')); parts.push(c);
+  }
+  // four legs folded under the thorax, tips trailing
+  for (const sd of [-1, 1]) for (let i = 0; i < 2; i++) {
+    const x0 = 0.25 - i * 0.3;
+    const up = vglow(xf(new T.CylinderGeometry(0.03, 0.045, 0.36, 5), [x0, -0.2, sd * 0.24], [sd * 0.9, 0, 0.5]), none); vcolor(up, solid('#0b0e10')); parts.push(up);
+    const lo = vglow(xf(new T.ConeGeometry(0.025, 0.5, 5), [x0 - 0.22, -0.48, sd * 0.32], [sd * 0.5, 0, 1.9]), none); vcolor(lo, solid('#07090b')); parts.push(lo);
+  }
+  return merge(parts);
+}
+function wingTexture() {
+  const c = mk(128, 64), g = c.getContext('2d');
+  g.clearRect(0, 0, 128, 64);
+  // membrane: pale, denser toward the root, with a faint iridescent tint
+  const grd = g.createLinearGradient(0, 0, 128, 0); grd.addColorStop(0, 'rgba(200,225,220,0.55)'); grd.addColorStop(0.6, 'rgba(170,205,200,0.32)'); grd.addColorStop(1, 'rgba(150,190,190,0.18)');
+  g.fillStyle = grd; g.beginPath(); g.moveTo(0, 30); g.quadraticCurveTo(50, 0, 126, 12); g.quadraticCurveTo(110, 40, 80, 56); g.quadraticCurveTo(30, 66, 0, 40); g.closePath(); g.fill();
+  // veins
+  g.strokeStyle = 'rgba(40,60,58,0.75)'; g.lineWidth = 1.4;
+  for (const [x1, y1, cx, cy, x2, y2] of [[0, 34, 50, 22, 124, 14], [0, 36, 55, 30, 112, 30], [0, 38, 50, 42, 92, 50], [0, 40, 30, 52, 60, 58]]) { g.beginPath(); g.moveTo(x1, y1); g.quadraticCurveTo(cx, cy, x2, y2); g.stroke(); }
+  g.lineWidth = 0.8; g.strokeStyle = 'rgba(40,60,58,0.45)';
+  for (let i = 0; i < 9; i++) { const x = 20 + i * 11; g.beginPath(); g.moveTo(x, 20 + i * 1.2); g.lineTo(x + 6, 48 - i * 1.5); g.stroke(); }
+  return cTex(c, true);
+}
+function buildFliers() {
+  flyBody = new T.InstancedMesh(flierGeometry(), M.chitin, MAX_FLY);
+  flyBody.instanceColor = new T.InstancedBufferAttribute(new Float32Array(MAX_FLY * 3).fill(1), 3).setUsage(T.DynamicDrawUsage);
+  flyBody.geometry.setAttribute('iGlow', new T.InstancedBufferAttribute(new Float32Array(MAX_FLY).fill(1), 1).setUsage(T.DynamicDrawUsage));
+  const eyeGeo = merge([[0.78, 0.06, 0.13, 0.055], [0.78, 0.06, -0.13, 0.055], [0.7, 0.14, 0.07, 0.03], [0.7, 0.14, -0.07, 0.03]].map(([x, y, z, r]) => xf(new T.SphereGeometry(r, 7, 5), [x, y, z])));
+  flyEyes = new T.InstancedMesh(eyeGeo, M.eyes, MAX_FLY);
+  const wg = new T.PlaneGeometry(1.4, 0.58); wg.translate(0.68, 0, 0); // hinge at the root
+  const wm = new T.MeshStandardMaterial({ map: wingTexture(), transparent: true, opacity: 0.85, side: T.DoubleSide, depthWrite: false, roughness: 0.25, metalness: 0.1, emissive: new T.Color(0.02, 0.05, 0.05), envMapIntensity: 0.8, alphaTest: 0.02 });
+  flyWings = new T.InstancedMesh(wg, wm, MAX_FLY * 4);
+  for (const m of [flyBody, flyEyes, flyWings]) { m.frustumCulled = false; m.count = 0; m.castShadow = m === flyBody; m.receiveShadow = m === flyBody; scene.add(m); }
+  const gg = new T.SphereGeometry(0.17, 8, 6); gg.scale(1.3, 0.85, 0.85);
+  globMesh = new T.InstancedMesh(gg, new T.MeshBasicMaterial({ color: new T.Color(0.35, 1.6, 0.9) }), MAX_GLOB);
+  globMesh.frustumCulled = false; globMesh.count = 0; scene.add(globMesh);
+}
+const _WM = new T.Matrix4(), _WL = new T.Matrix4();
+function renderFliers(dt) {
+  let n = 0;
+  const gA = flyBody.geometry.attributes.iGlow.array;
+  for (const b of bugs) {
+    if (!b.fly || n >= MAX_FLY) continue;
+    const sp = Math.hypot(b.vx, b.vz);
+    // nose dips with speed, banks into turns; dead ones tumble onto their backs
+    const pitch = b.dead ? 0 : clamp(-sp * 0.03 + (b.vy || 0) * -0.04, -0.4, 0.3) + (b.lunge > 0 ? -0.5 * Math.sin(b.lunge / 0.25 * Math.PI) : 0);
+    const bank = b.dead ? b.roll : clamp(b.turn * 0.8, -0.55, 0.55);
+    _e.set(bank, -b.h, pitch, 'YZX'); _q1.setFromEuler(_e); _e.order = 'XYZ';
+    const y = b.dead ? b.y + 0.22 * b.k : b.y + Math.sin(b.phase) * 0.08;
+    _m.compose(_v1.set(b.x, y, b.z), _q1, _s.set(b.k, b.k, b.k));
+    flyBody.setMatrixAt(n, _m); flyEyes.setMatrixAt(n, _m);
+    const f = b.flash > 0 ? 1.9 : 1; _c.setRGB(b.tint * f, b.tint * f, b.tint * f); if (b.dead) _c.multiplyScalar(0.55); flyBody.setColorAt(n, _c);
+    gA[n] = b.dead ? Math.max(0, 1 - b.deadT * 0.6) * 0.6 : 0.85 + (b.flash > 0 ? 1.6 : 0) + (b.lunge > 0 ? 0.7 : 0);
+    // wings: two pairs, beating fast; fold flat along the body when dead
+    const beat = b.dead ? 0 : Math.sin(clock * 62 + b.phase) * 0.75;
+    for (let w = 0; w < 4; w++) {
+      const sd = w & 1 ? 1 : -1, back = w >> 1;
+      if (b.dead) { _WL.makeRotationY(sd * (2.4 + back * 0.3)); _WL.setPosition(0.12 - back * 0.22, 0.1, sd * 0.1); }
+      else { _e.set(sd * (beat + (back ? 0.2 : -0.1)), sd * (back ? 0.55 : 0.25), 0, 'ZYX'); _WL.makeRotationFromEuler(_e); _e.order = 'XYZ'; _WL.setPosition(0.12 - back * 0.22, 0.16, sd * 0.14); }
+      _WM.multiplyMatrices(_m, _WL); flyWings.setMatrixAt(n * 4 + w, _WM);
+    }
+    const dq = (b.x - camera.position.x) ** 2 + (b.z - camera.position.z) ** 2;
+    if (dq < 3600 && !b.dead) blobAt(b.x, b.z, -b.h, 2.4 * b.k, 2.2 * b.k, 0.28 * clamp(1 - (b.y - terrainH(b.x, b.z)) / 14, 0.2, 1));
+    n++;
+  }
+  const up = (attr, cnt) => { attr.updateRange.count = cnt; attr.needsUpdate = true; };
+  flyBody.count = flyEyes.count = n; flyWings.count = n * 4;
+  up(flyBody.instanceMatrix, n * 16); up(flyEyes.instanceMatrix, n * 16); up(flyWings.instanceMatrix, n * 64); up(flyBody.instanceColor, n * 3); up(flyBody.geometry.attributes.iGlow, n);
+  let gi = 0;
+  for (const g of globs) { if (gi >= MAX_GLOB) break; _q1.setFromUnitVectors(UP, _v2.set(g.vx, g.vy, g.vz).normalize()); _m.compose(_v1.set(g.x, g.y, g.z), _q1, _s.set(1, 1, 1)); globMesh.setMatrixAt(gi++, _m); }
+  globMesh.count = gi; up(globMesh.instanceMatrix, gi * 16);
+}
+// hover at a standoff from whoever is nearest, circling slowly, and lob acid every few seconds
+let globs = [];
+function flierTarget(b) {
+  let best = null, bd = 45 * 45;
+  const consider = (s) => { if (!s || !s.alive || s.state !== 'ok') return; const d = (s.x - b.x) ** 2 + (s.z - b.z) ** 2; if (d < bd) { bd = d; best = s; } };
+  if (mode === 'play') consider(player);
+  for (const m of squad) consider(m);
+  return best;
+}
+function updateFlier(b, dt) {
+  if (b.flash > 0) b.flash -= dt;
+  b.retgt -= dt;
+  if (b.retgt <= 0) { b.retgt = rand(0.6, 1.1); b.tgt = flierTarget(b); }
+  const t = b.tgt && b.tgt.alive && b.tgt.state === 'ok' ? b.tgt : null;
+  const tx = t ? t.x : POST.x, tz = t ? t.z : POST.z;
+  // orbit point: a ring around the target, drifting round it; the ring tightens as the wave goes on
+  b.orb += b.odir * dt * 0.32;
+  const ring = t ? 9.5 : BUNKER_R + 7;
+  const wx = tx + Math.cos(b.orb) * ring, wz = tz + Math.sin(b.orb) * ring;
+  const gy = terrainH(b.x, b.z), alt = gy + b.altT + Math.sin(clock * 0.9 + b.phase) * 0.5;
+  let dx = wx - b.x, dz = wz - b.z; const d = Math.hypot(dx, dz) || 1;
+  const spd = Math.abs(b.z) > BAR_Z + 20 ? b.spd * 1.6 : b.spd;
+  const ax = dx / d * Math.min(spd, d * 1.2), az = dz / d * Math.min(spd, d * 1.2);
+  const bl = Math.min(1, dt * 1.6);
+  b.vx += (ax - b.vx) * bl; b.vz += (az - b.vz) * bl;
+  b.vy = ((alt - b.y) * 2.2 - (b.vy || 0)) * Math.min(1, dt * 3) + (b.vy || 0);
+  b.x += b.vx * dt; b.z += b.vz * dt; b.y += b.vy * dt;
+  b.x = clamp(b.x, -ROAD_HALF - 6, ROAD_HALF + 6);
+  // keep off the canyon walls: never below the terrain plus clearance
+  if (b.y < gy + 2.5) b.y = gy + 2.5;
+  // face the target once in range, otherwise the way it flies
+  const face = t || Math.abs(b.z) < BAR_Z + 30 ? Math.atan2(tz - b.z, tx - b.x) : Math.atan2(b.vz, b.vx);
+  const turn = angDiff(b.h, face); b.turn = lerp(b.turn || 0, clamp(turn, -1, 1), Math.min(1, dt * 3));
+  b.h += turn * Math.min(1, dt * 3.5);
+  b.phase += dt * 6;
+  if (b.lunge > 0) b.lunge -= dt;
+  b.near = Math.hypot(tx - b.x, tz - b.z) < 16;
+  // spit
+  b.spitCd -= dt;
+  if (mode === 'play' && b.spitCd <= 0 && b.near) {
+    b.spitCd = rand(2.6, 4.0); b.lunge = 0.25;
+    const T0 = 0.95, G = 14;
+    const lx = t ? t.x + (t.vx || 0) * 0.35 : tx, lz = t ? t.z + (t.vz || 0) * 0.35 : tz, ly = terrainH(lx, lz);
+    const mx = b.x + Math.cos(b.h) * 0.8, mz = b.z + Math.sin(b.h) * 0.8, my = b.y - 0.3;
+    globs.push({ x: mx, y: my, z: mz, vx: (lx - mx) / T0, vy: (ly - my + 0.5 * G * T0 * T0) / T0, vz: (lz - mz) / T0, t: 0 });
+    Snd.at('spit', b.x, b.z, { v: 0.7, cat: 'bug', key: 'sp', gap: 0.2, range: 45 });
+  }
+}
+function updateGlobs(dt) {
+  const keep = [];
+  for (const g of globs) {
+    g.t += dt; g.vy -= 14 * dt; g.x += g.vx * dt; g.y += g.vy * dt; g.z += g.vz * dt;
+    if (Math.random() < dt * 30) part(fxAdd, { x: g.x, y: g.y, z: g.z, vx: rand(-0.3, 0.3), vy: rand(-0.3, 0.3), vz: rand(-0.3, 0.3), drag: 2, life: rand(0.25, 0.4), r: 0.15, gg: 0.9, b: 0.45, a: 0.7, s0: 0.14, s1: 0.03 });
+    const gy = terrainH(g.x, g.z);
+    if (g.y > gy && g.t < 4) { keep.push(g); continue; }
+    acidSplash(g.x, gy, g.z);
+  }
+  globs = keep;
+}
+function acidSplash(x, y, z) {
+  Snd.at('splash', x, z, { v: 0.75, cat: 'hit', key: 'spl', gap: 0.08, range: 40 });
+  splatDecals[(Math.random() * splatDecals.length) | 0].add(x, z, rand(0.9, 1.3));
+  for (let i = 0; i < 16; i++) part(fxAlpha, { x, y: y + 0.05, z, vx: rand(-3, 3), vy: rand(1.5, 5), vz: rand(-3, 3), g: 13, drag: 0.6, life: rand(0.5, 0.9), r: 0.03, gg: 0.22, b: 0.14, a: 0.95, s0: rand(0.08, 0.16), s1: 0.04, floor: true, land: inkDrop });
+  for (let i = 0; i < 6; i++) part(fxAdd, { x, y: y + 0.1, z, vx: rand(-2, 2), vy: rand(1, 3), vz: rand(-2, 2), g: 8, drag: 1, life: rand(0.4, 0.8), r: 0.1, gg: 0.8, b: 0.4, a: 1, s0: 0.1, s1: 0.03, floor: true });
+  for (let i = 0; i < 3; i++) part(fxSmoke, { x: x + rand(-0.4, 0.4), y: y + 0.2, z: z + rand(-0.4, 0.4), vx: rand(-0.2, 0.2), vy: rand(0.5, 1.1), vz: rand(-0.2, 0.2), drag: 0.8, life: rand(1.2, 2), r: 0.25, gg: 0.5, b: 0.35, a: 0.35, s0: 0.5, s1: 1.8, fin: 6 });
+  if (mode !== 'play') return;
+  const R = 2.1, hit = { x, z };
+  if (player.alive && Math.hypot(player.x - x, player.z - z) < R) hurtTarget(player, hit, 9);
+  for (const m of squad) if (m.state === 'ok' && Math.hypot(m.x - x, m.z - z) < R) hurtTarget(m, hit, 8);
+  if (Math.hypot(POST.x - x, POST.z - z) < BUNKER_R + 1.6) hurtTarget(null, hit, 5);
+}
 function jawGeometry() {
   const bar = (a, b, r0, r1) => {
     const A = new T.Vector3(a[0], a[1], a[2]), B = new T.Vector3(b[0], b[1], b[2]), d = B.clone().sub(A), len = d.length();
@@ -6373,6 +6550,7 @@ function buildBugMeshes() {
   bugLegs = new T.InstancedMesh(legGeo, M.leg, MAX_BUGS * LIMBS);
   bugTips = new T.InstancedMesh(tipGeo, M.leg, MAX_BUGS * LIMBS);
   bugJaws = new T.InstancedMesh(jawGeometry(), M.jaw, MAX_BUGS * 2);
+  buildFliers();
   for (const m of [bugBody, bugBodyLo, bugEyes, bugLegs, bugTips, bugJaws]) { m.frustumCulled = false; m.count = 0; m.castShadow = m !== bugEyes; m.receiveShadow = m !== bugEyes; scene.add(m); }
   // r128 sizes instanceColor from .count, which is already 0 here, so allocate it explicitly
   for (const m of [bugBody, bugBodyLo]) {
@@ -6401,6 +6579,18 @@ function spawnBug(kind, side) {
   let x, z, em = false, climber = false;
   if (CLOSEUP && mode === 'title') { x = rand(-4, 4); z = rand(24, 30); }
   else if (kind === 'climb') { x = (Math.random() < 0.5 ? -1 : 1) * (ROAD_HALF + rand(7, 9)); z = rand(-BAR_Z + 2.5, BAR_Z - 2.5); climber = true; }
+  else if (kind === 'fly') {
+    x = rand(-ROAD_HALF + 2, ROAD_HALF - 2); z = side * rand(92, 110);
+    const k = rand(0.95, 1.15);
+    bugs.push({
+      x, z, y: terrainH(x, z) + rand(7, 10), vx: 0, vz: 0, vy: 0, h: Math.atan2(-z, -x), k, r: 0.5 * k, brute: false, rear: 0, jaw: 0, near: false, fly: true,
+      hp: 2.4 + Math.max(0, waveN - 4) * 0.2, phase: rand(TAU), gait: 1, em: 1, bite: 0, lunge: 0, biting: false, flash: 0,
+      tint: rand(0.85, 1.1), hue: 0, tgt: null, retgt: rand(0.3), spd: rand(6.5, 8), dead: false, deadT: 0, roll: 0,
+      lane: 0, climber: false, leap: 0, leapCd: 99, lh: 0, orb: rand(TAU), odir: Math.random() < 0.5 ? -1 : 1, altT: rand(6, 8.5), spitCd: rand(1.5, 3), turn: 0,
+    });
+    if (mode === 'play' && !flyWarned) { flyWarned = true; say('c_fliers', 2); }
+    return true;
+  }
   else if (kind === 'hole') {
     const hs = holes.filter((h) => Math.sign(h.z) === side), h = hs[(Math.random() * hs.length) | 0] || holes[0];
     x = h.x + rand(-0.6, 0.6); z = h.z + rand(-0.6, 0.6); em = true;
@@ -6419,8 +6609,9 @@ function spawnBug(kind, side) {
 }
 function killBug(b, dx, dz) {
   if (b.dead) return;
-  b.dead = true; b.deadT = 0; b.vx += dx * 3; b.vz += dz * 3; b.vy = 3.2;
-  if (mode === 'play') { kills++; earn(b.brute ? 20 : 5); if (waveN >= SUPPORTS[0].unlock) { support = Math.min(SUPPORT_MAX, support + 1); if (support >= SUPPORT_MAX && !airCalled) { airCalled = true; say('c_airready', 2); } } }
+  b.dead = true; b.deadT = 0; b.vx += dx * 3; b.vz += dz * 3; b.vy = b.fly ? 1.5 : 3.2;
+  if (b.fly) Snd.at('death', b.x, b.z, { v: 0.6, cat: 'bug', key: 'fd', gap: 0.3, rate: 1.9, range: 60 });
+  if (mode === 'play') { kills++; earn(b.brute ? 20 : b.fly ? 8 : 5); if (waveN >= SUPPORTS[0].unlock) { support = Math.min(SUPPORT_MAX, support + 1); if (support >= SUPPORT_MAX && !airCalled) { airCalled = true; say('c_airready', 2); } } }
   burstBug(b, dx, dz);
   Snd.at('flesh', b.x, b.z, { v: 0.5, cat: 'hit', key: 'fl', gap: 0.06 });
   if (mode !== 'title' && Math.random() < 0.15) Snd.at('death', b.x, b.z, { v: 0.55, cat: 'bug', key: 'de', gap: 0.9, rate: 1.45 / (b.k + 0.1), range: 70 });
@@ -6432,6 +6623,7 @@ function renderBugs(dt) {
   const ccx = camera.position.x, ccz = camera.position.z;
   for (let n = 0; n < bugs.length; n++) {
     const b = bugs[n];
+    if (b.fly) continue;
     const k = b.k, ch = Math.cos(b.h), sh = Math.sin(b.h);
     const fx = ch, fz = sh; _side.set(-sh, 0, ch);
     const st = b.lunge > 0 ? Math.sin((0.2 - b.lunge) / 0.2 * Math.PI) : 0;
@@ -6497,6 +6689,7 @@ function renderBugs(dt) {
     bi++;
   }
   for (const m of squad) { if (m.state === 'down') blobAt(m.x, m.z, m.yaw, 1.4, 2.2, 0.4); else blobAt(m.x, m.z, m.yaw, 1.5, 1.5, 0.5); }
+  renderFliers(dt);
   blobsDone();
   const up = (attr, n) => { attr.updateRange.count = n; attr.needsUpdate = true; };
   bugBody.count = ni; bugBodyLo.count = fi; bugEyes.count = bi; bugLegs.count = bugTips.count = bi * LIMBS; bugJaws.count = bi * 2;
@@ -7025,8 +7218,8 @@ function buildBoomPool() {
 // ======================= sound =======================
 // Recorded samples (Red Eclipse, Tremulous/Unvanquished; CC BY-SA) and generated radio voices,
 // packed into one file; the synth below is only a fallback while the pack loads.
-const SFX = {"file":"sfx.mp3?v=67e8281c","items":{"ar_1":[0,3178],"ar_2":[3178,3178],"ar_3":[6356,3178],"bigboom_1":[9534,26166],"bigboom_2":[35700,26584],"bigboom_3":[62284,26793],"bite_1":[89077,2578],"bite_2":[91655,2108],"bite_3":[93763,1637],"bite_4":[95400,1637],"boom_1":[97037,16135],"boom_2":[113172,15717],"boom_3":[128889,15508],"bounce_1":[144397,1324],"bounce_2":[145721,854],"cannon":[146575,11746],"charge":[158321,30973],"click":[189294,1715],"death_1":[191009,10910],"death_2":[201919,10910],"death_3":[212829,10910],"death_4":[223739,10910],"death_5":[234649,10910],"death_6":[245559,9657],"farboom_1":[255216,14672],"farboom_2":[269888,14254],"fire":[284142,21856],"flesh_1":[305998,1637],"flesh_2":[307635,1637],"flesh_3":[309272,1637],"flesh_4":[310909,1637],"gtail":[312546,27420],"horde":[339966,75485],"hurt_1":[415451,4772],"hurt_2":[420223,4145],"hurt_3":[424368,4302],"hurt_4":[428670,1951],"ignite":[430621,13836],"jet":[444457,52497],"lmg_1":[496954,3387],"lmg_2":[500341,3387],"lmg_3":[503728,3387],"lmg_4":[507115,3387],"mini_1":[510502,1924],"mini_2":[512426,1924],"mini_3":[514350,1924],"mini_4":[516274,1924],"orbital":[518198,60649],"pain_1":[578847,4929],"pain_2":[583776,4615],"pain_3":[588391,4145],"pain_4":[592536,6026],"pounce":[598562,4223],"reload_ar":[602785,11746],"reload_lmg":[614531,13418],"reload_sg":[627949,4014],"reload_smg":[631963,10075],"ric_1":[642038,3988],"ric_2":[646026,3988],"ric_3":[650014,3832],"ric_4":[653846,3988],"roar_1":[657834,26793],"roar_2":[684627,14881],"roar_3":[699508,20524],"roar_4":[720032,16553],"scream_1":[736585,13627],"scream_2":[750212,10701],"scream_3":[760913,18643],"scream_4":[779556,9657],"scream_5":[789213,7985],"sg_1":[797198,4014],"sg_2":[801212,4014],"sg_3":[805226,4014],"shell_1":[809240,1010],"shell_2":[810250,697],"shell_3":[810947,1010],"shell_4":[811957,697],"siren":[812654,160176],"smg_1":[972830,2342],"smg_2":[975172,2342],"smg_3":[977514,2342],"spin":[979856,11041],"spinup":[990897,6313],"step_1":[997210,2264],"step_2":[999474,2264],"step_3":[1001738,2264],"step_4":[1004002,2264],"stomp_1":[1006266,11537],"stomp_2":[1017803,11537],"stomp_3":[1029340,6940],"stomp_4":[1036280,6313],"swap":[1042593,5686],"swarm":[1048279,36432],"tower_1":[1084711,4641],"tower_2":[1089352,4641],"tower_3":[1093993,4641],"v_c_airready":[1098634,18904],"v_c_arty":[1117538,22431],"v_c_clear":[1139969,38627],"v_c_climb":[1178596,20994],"v_c_down":[1199590,25696],"v_c_downH":[1225286,17076],"v_c_downK":[1242362,17337],"v_c_downO":[1259699,17468],"v_c_downR":[1277167,16815],"v_c_gunship":[1293982,17076],"v_c_lostH":[1311058,22431],"v_c_lostK":[1333489,21125],"v_c_lostO":[1354614,22823],"v_c_lostR":[1377437,21647],"v_c_napalm":[1399084,16815],"v_c_orbital":[1415899,20994],"v_c_overrun":[1436893,22562],"v_c_post25":[1459455,18904],"v_c_post50":[1478359,21255],"v_c_start":[1499614,49468],"v_c_towerFL":[1549082,19557],"v_c_towerFR":[1568639,20472],"v_c_towerRL":[1589111,19296],"v_c_towerRR":[1608407,20080],"v_c_wave1":[1628487,26219],"v_c_wave2":[1654706,21778],"v_c_wave3":[1676484,19557],"v_c_wave4":[1696041,25304],"v_h_cry1":[1721345,7280],"v_h_cry2":[1728625,7541],"v_h_cry3":[1736166,9239],"v_h_cry4":[1745405,7411],"v_h_help":[1752816,13027],"v_h_hit":[1765843,11198],"v_h_joke1":[1777041,17076],"v_h_joke2":[1794117,18121],"v_h_joke3":[1812238,11329],"v_h_joke4":[1823567,17990],"v_h_reload":[1841557,8586],"v_h_thanks":[1850143,14725],"v_k_breach":[1864868,10937],"v_k_cry1":[1875805,5974],"v_k_cry2":[1881779,9762],"v_k_cry3":[1891541,5321],"v_k_cry4":[1896862,6366],"v_k_front":[1903228,11590],"v_k_help":[1914818,11068],"v_k_hit":[1925886,9631],"v_k_joke1":[1935517,15378],"v_k_joke2":[1950895,11329],"v_k_joke3":[1962224,12635],"v_k_joke4":[1974859,17468],"v_k_reload":[1992327,9370],"v_k_thanks":[2001697,11460],"v_k_where":[2013157,9370],"v_o_cry1":[2022527,7019],"v_o_cry2":[2029546,7672],"v_o_cry3":[2037218,9370],"v_o_cry4":[2046588,6888],"v_o_help":[2053476,13811],"v_o_hit":[2067287,15509],"v_o_joke1":[2082796,11851],"v_o_joke2":[2094647,16553],"v_o_joke3":[2111200,25174],"v_o_joke4":[2136374,17076],"v_o_reload":[2153450,10153],"v_o_thanks":[2163603,14072],"v_r_breach":[2177675,10415],"v_r_cry1":[2188090,6235],"v_r_cry2":[2194325,6757],"v_r_cry3":[2201082,7802],"v_r_cry4":[2208884,8586],"v_r_help":[2217470,11460],"v_r_hit":[2228930,9892],"v_r_holes":[2238822,12374],"v_r_joke1":[2251196,11590],"v_r_joke2":[2262786,18513],"v_r_joke3":[2281299,11068],"v_r_joke4":[2292367,14855],"v_r_rear":[2307222,13419],"v_r_reload":[2320641,9762],"v_r_thanks":[2330403,14072],"whistle":[2344475,21359],"wind":[2365834,80423]}};
-const LINES = {"c_start":["COMMAND","CP-7, CP-7, this is Command! The whole canyon is moving, I say again, the whole canyon! Kessler, Holt, front! Ruiz, Okafor, rear! Hold the line! Hold it!","panic"],"c_wave1":["COMMAND","Contacts! Both ends, both ends of the canyon! Heavy... they're heavy. Hold the road!","urgent"],"c_wave2":["COMMAND","Tracker is maxed out! I can't even count them! Hold both walls!","urgent"],"c_wave3":["COMMAND","Here they come again... Stand your ground. Stand your ground!","urgent"],"c_wave4":["COMMAND","That is... that is the biggest swarm yet. Every gun on that road! Everything you've got!","panic"],"c_clear":["COMMAND","Road is quiet... for now. Supply drop is down. Spend your points, and spend them fast. They will be back.","relief"],"c_post50":["COMMAND","Post integrity fifty percent! Push them back! Push them back!","urgent"],"c_post25":["COMMAND","The post is failing! We're losing it! Clear those walls, now!","panic"],"c_climb":["COMMAND","Movement on the ridge! They're on the walls, they're coming down the walls!","panic"],"c_lostK":["COMMAND","We lost Kessler... Damn it. Keep that post standing.","grim"],"c_lostR":["COMMAND","We lost Ruiz... Damn it. Keep that post standing.","grim"],"c_lostH":["COMMAND","We lost Holt... God damn it. Keep that post standing.","grim"],"c_lostO":["COMMAND","We lost Okafor... Damn it all. Keep that post standing.","grim"],"c_downK":["COMMAND","Kessler is down! Front barricade! Somebody get to him!","panic"],"c_downR":["COMMAND","Ruiz is down! Rear barricade! Somebody get to him!","panic"],"c_downH":["COMMAND","Holt is down! Front barricade! Get to her, get to her!","panic"],"c_downO":["COMMAND","Okafor is down! Rear barricade! Somebody get to him!","panic"],"c_towerFL":["COMMAND","Front left tower is dry. That pad's done.","grim"],"c_towerFR":["COMMAND","Front right tower is dry. That pad's done.","grim"],"c_towerRL":["COMMAND","Rear left tower is dry. That pad's done.","grim"],"c_towerRR":["COMMAND","Rear right tower is dry. That pad's done.","grim"],"c_arty":["COMMAND","Fire mission confirmed! Shells inbound, heads down, heads down!","urgent"],"c_napalm":["COMMAND","Napalm run on your mark! Stay off that road!","urgent"],"c_gunship":["COMMAND","Gunship on station. Engaging your target.","calm"],"c_orbital":["COMMAND","Orbital strike authorised. Charging... brace yourselves.","calm"],"c_airready":["COMMAND","Air support is standing by. Call it in when you need it.","calm"],"c_overrun":["COMMAND","We have lost the post... All units, fall back. Fall back.","grim"],"c_down":["COMMAND","Trooper down at CP-7... No response. No response.","grim"],"k_hit":["KESSLER","Argh! I'm hit! I'm hit! Get over here!","pain"],"k_thanks":["KESSLER","Thanks... thanks. Okay. Back in it.","relief"],"k_breach":["KESSLER","They're over the wall! They're over the front wall!","panic"],"k_reload":["KESSLER","Reloading! Cover me, cover me!","urgent"],"k_front":["KESSLER","Front road is black with them! Black with them!","panic"],"k_where":["KESSLER","Where are they all coming from?! Where?!","panic"],"k_help":["KESSLER","Hold on! I'm coming to you! Hold on!","urgent"],"k_cry1":["KESSLER","Die, alien scum!","shout"],"k_cry2":["KESSLER","Come on, you ugly bugs! Come get some!","shout"],"k_cry3":["KESSLER","Eat lead, bug!","shout"],"k_cry4":["KESSLER","Is that all you've got?!","shout"],"k_joke1":["KESSLER","Somebody call pest control. Oh wait... that's us.","joke"],"k_joke2":["KESSLER","Ten bucks says I get more than you, Ruiz!","joke"],"k_joke3":["KESSLER","Note to self. Never... volunteer... again.","joke"],"k_joke4":["KESSLER","I've seen bigger bugs in my mum's kitchen. No I haven't.","joke"],"r_hit":["RUIZ","Ah! Man down! Man down! Get over here!","pain"],"r_thanks":["RUIZ","Thanks, man... I owe you one. I owe you one.","relief"],"r_breach":["RUIZ","Breach at the back! Breach! I need you here!","panic"],"r_reload":["RUIZ","Changing mags! Changing mags!","urgent"],"r_rear":["RUIZ","Rear barricade, they just keep coming! They keep coming!","panic"],"r_holes":["RUIZ","More out of the holes! Watch the back! Watch the back!","panic"],"r_help":["RUIZ","Stay with me! I'm on my way! Stay with me!","urgent"],"r_cry1":["RUIZ","Die, alien scum!","shout"],"r_cry2":["RUIZ","Hasta la vista, bug!","shout"],"r_cry3":["RUIZ","Not today, bug! Not today!","shout"],"r_cry4":["RUIZ","Keep them coming! I've got plenty!","shout"],"r_joke1":["RUIZ","You owe me ten bucks, Kessler. I'm counting.","joke"],"r_joke2":["RUIZ","I joined for the free travel. Nobody said anything about bugs.","joke"],"r_joke3":["RUIZ","Is it just me, or are they getting uglier?","joke"],"r_joke4":["RUIZ","I'm going to need a really, really big can of bug spray.","joke"],"h_hit":["HOLT","Agh! I'm hit! I need a hand here! Now!","pain"],"h_thanks":["HOLT","Thanks... I owe you a drink. Okay. Okay.","relief"],"h_reload":["HOLT","Reloading! Reloading!","urgent"],"h_help":["HOLT","Hang on, I've got you! Don't you dare quit on me!","urgent"],"h_cry1":["HOLT","Die, alien scum!","shout"],"h_cry2":["HOLT","Back in your hole, bug!","shout"],"h_cry3":["HOLT","Who ordered the extra crispy?!","shout"],"h_cry4":["HOLT","Come on then! Next!","shout"],"h_joke1":["HOLT","My mum wanted me to be a dentist. Look at all these teeth.","joke"],"h_joke2":["HOLT","Kessler, step on my foot one more time and I am feeding you to them.","joke"],"h_joke3":["HOLT","Anyone else smell burnt bug? Just me?","joke"],"h_joke4":["HOLT","Remind me to put in for a transfer. Somewhere with fewer legs.","joke"],"o_hit":["OKAFOR","Argh! I'm down! I'm down! Somebody get over here!","pain"],"o_thanks":["OKAFOR","Cheers... cheers. Back on the line.","relief"],"o_reload":["OKAFOR","Changing magazines! Cover!","urgent"],"o_help":["OKAFOR","Hold on, brother! I'm coming! Hold on!","urgent"],"o_cry1":["OKAFOR","Die, alien scum!","shout"],"o_cry2":["OKAFOR","Not one step further!","shout"],"o_cry3":["OKAFOR","Keep coming! I've got all night!","shout"],"o_cry4":["OKAFOR","Say goodnight, bug!","shout"],"o_joke1":["OKAFOR","Ruiz, you still owe me for breakfast.","joke"],"o_joke2":["OKAFOR","They told me this was a quiet posting. They lied.","joke"],"o_joke3":["OKAFOR","If I survive this, I am retiring to a planet with no bugs. Any planet.","joke"],"o_joke4":["OKAFOR","Somebody tell the brass we need a bigger fly swatter.","joke"]};
+const SFX = {"file":"sfx.mp3?v=a43a1ccb","items":{"ar_1":[0,3178],"ar_2":[3178,3178],"ar_3":[6356,3178],"bigboom_1":[9534,26166],"bigboom_2":[35700,26584],"bigboom_3":[62284,26793],"bite_1":[89077,2578],"bite_2":[91655,2108],"bite_3":[93763,1637],"bite_4":[95400,1637],"boom_1":[97037,16135],"boom_2":[113172,15717],"boom_3":[128889,15508],"bounce_1":[144397,1324],"bounce_2":[145721,854],"buzz":[146575,8220],"cannon":[154795,11746],"charge":[166541,30973],"click":[197514,1715],"death_1":[199229,10910],"death_2":[210139,10910],"death_3":[221049,10910],"death_4":[231959,10910],"death_5":[242869,10910],"death_6":[253779,9657],"fanfare":[263436,105997],"farboom_1":[369433,14672],"farboom_2":[384105,14254],"fire":[398359,21856],"flesh_1":[420215,1637],"flesh_2":[421852,1637],"flesh_3":[423489,1637],"flesh_4":[425126,1637],"gtail":[426763,27420],"horde":[454183,75485],"hurt_1":[529668,4772],"hurt_2":[534440,4145],"hurt_3":[538585,4302],"hurt_4":[542887,1951],"ignite":[544838,13836],"jet":[558674,52497],"lmg_1":[611171,3387],"lmg_2":[614558,3387],"lmg_3":[617945,3387],"lmg_4":[621332,3387],"mini_1":[624719,1924],"mini_2":[626643,1924],"mini_3":[628567,1924],"mini_4":[630491,1924],"orbital":[632415,60649],"pain_1":[693064,4929],"pain_2":[697993,4615],"pain_3":[702608,4145],"pain_4":[706753,6026],"pounce":[712779,4223],"reload_ar":[717002,11746],"reload_lmg":[728748,13418],"reload_sg":[742166,4014],"reload_smg":[746180,10075],"ric_1":[756255,3988],"ric_2":[760243,3988],"ric_3":[764231,3832],"ric_4":[768063,3988],"roar_1":[772051,26793],"roar_2":[798844,14881],"roar_3":[813725,20524],"roar_4":[834249,16553],"scream_1":[850802,13627],"scream_2":[864429,10701],"scream_3":[875130,18643],"scream_4":[893773,9657],"scream_5":[903430,7985],"sg_1":[911415,4014],"sg_2":[915429,4014],"sg_3":[919443,4014],"shell_1":[923457,1010],"shell_2":[924467,697],"shell_3":[925164,1010],"shell_4":[926174,697],"siren":[926871,160176],"smg_1":[1087047,2342],"smg_2":[1089389,2342],"smg_3":[1091731,2342],"spin":[1094073,11041],"spinup":[1105114,6313],"spit":[1111427,3832],"splash_1":[1115259,5869],"splash_2":[1121128,5869],"splash_3":[1126997,5869],"step_1":[1132866,2264],"step_2":[1135130,2264],"step_3":[1137394,2264],"step_4":[1139658,2264],"stomp_1":[1141922,11537],"stomp_2":[1153459,11537],"stomp_3":[1164996,6940],"stomp_4":[1171936,6313],"swap":[1178249,5686],"swarm":[1183935,36432],"tower_1":[1220367,4641],"tower_2":[1225008,4641],"tower_3":[1229649,4641],"v_c_airready":[1234290,18904],"v_c_arty":[1253194,22431],"v_c_clear":[1275625,38627],"v_c_climb":[1314252,20994],"v_c_down":[1335246,25696],"v_c_downH":[1360942,17076],"v_c_downK":[1378018,17337],"v_c_downO":[1395355,17468],"v_c_downR":[1412823,16815],"v_c_fliers":[1429638,28962],"v_c_gunship":[1458600,17076],"v_c_lostH":[1475676,22431],"v_c_lostK":[1498107,21125],"v_c_lostO":[1519232,22823],"v_c_lostR":[1542055,21647],"v_c_napalm":[1563702,16815],"v_c_orbital":[1580517,20994],"v_c_overrun":[1601511,22562],"v_c_post25":[1624073,18904],"v_c_post50":[1642977,21255],"v_c_start":[1664232,49468],"v_c_towerFL":[1713700,19557],"v_c_towerFR":[1733257,20472],"v_c_towerRL":[1753729,19296],"v_c_towerRR":[1773025,20080],"v_c_wave1":[1793105,26219],"v_c_wave2":[1819324,21778],"v_c_wave3":[1841102,19557],"v_c_wave4":[1860659,25304],"v_h_cry1":[1885963,7280],"v_h_cry2":[1893243,7541],"v_h_cry3":[1900784,9239],"v_h_cry4":[1910023,7411],"v_h_help":[1917434,13027],"v_h_hit":[1930461,11198],"v_h_joke1":[1941659,17076],"v_h_joke2":[1958735,18121],"v_h_joke3":[1976856,11329],"v_h_joke4":[1988185,17990],"v_h_reload":[2006175,8586],"v_h_thanks":[2014761,14725],"v_k_breach":[2029486,10937],"v_k_cry1":[2040423,5974],"v_k_cry2":[2046397,9762],"v_k_cry3":[2056159,5321],"v_k_cry4":[2061480,6366],"v_k_front":[2067846,11590],"v_k_help":[2079436,11068],"v_k_hit":[2090504,9631],"v_k_joke1":[2100135,15378],"v_k_joke2":[2115513,11329],"v_k_joke3":[2126842,12635],"v_k_joke4":[2139477,17468],"v_k_reload":[2156945,9370],"v_k_thanks":[2166315,11460],"v_k_where":[2177775,9370],"v_o_cry1":[2187145,7019],"v_o_cry2":[2194164,7672],"v_o_cry3":[2201836,9370],"v_o_cry4":[2211206,6888],"v_o_help":[2218094,13811],"v_o_hit":[2231905,15509],"v_o_joke1":[2247414,11851],"v_o_joke2":[2259265,16553],"v_o_joke3":[2275818,25174],"v_o_joke4":[2300992,17076],"v_o_reload":[2318068,10153],"v_o_thanks":[2328221,14072],"v_r_breach":[2342293,10415],"v_r_cry1":[2352708,6235],"v_r_cry2":[2358943,6757],"v_r_cry3":[2365700,7802],"v_r_cry4":[2373502,8586],"v_r_help":[2382088,11460],"v_r_hit":[2393548,9892],"v_r_holes":[2403440,12374],"v_r_joke1":[2415814,11590],"v_r_joke2":[2427404,18513],"v_r_joke3":[2445917,11068],"v_r_joke4":[2456985,14855],"v_r_rear":[2471840,13419],"v_r_reload":[2485259,9762],"v_r_thanks":[2495021,14072],"whistle":[2509093,21359],"wind":[2530452,80423]}};
+const LINES = {"c_start":["COMMAND","CP-7, CP-7, this is Command! The whole canyon is moving, I say again, the whole canyon! Kessler, Holt, front! Ruiz, Okafor, rear! Hold the line! Hold it!","panic"],"c_wave1":["COMMAND","Contacts! Both ends, both ends of the canyon! Heavy... they're heavy. Hold the road!","urgent"],"c_wave2":["COMMAND","Tracker is maxed out! I can't even count them! Hold both walls!","urgent"],"c_wave3":["COMMAND","Here they come again... Stand your ground. Stand your ground!","urgent"],"c_wave4":["COMMAND","That is... that is the biggest swarm yet. Every gun on that road! Everything you've got!","panic"],"c_clear":["COMMAND","Road is quiet... for now. Supply drop is down. Spend your points, and spend them fast. They will be back.","relief"],"c_post50":["COMMAND","Post integrity fifty percent! Push them back! Push them back!","urgent"],"c_post25":["COMMAND","The post is failing! We're losing it! Clear those walls, now!","panic"],"c_climb":["COMMAND","Movement on the ridge! They're on the walls, they're coming down the walls!","panic"],"c_lostK":["COMMAND","We lost Kessler... Damn it. Keep that post standing.","grim"],"c_lostR":["COMMAND","We lost Ruiz... Damn it. Keep that post standing.","grim"],"c_lostH":["COMMAND","We lost Holt... God damn it. Keep that post standing.","grim"],"c_lostO":["COMMAND","We lost Okafor... Damn it all. Keep that post standing.","grim"],"c_downK":["COMMAND","Kessler is down! Front barricade! Somebody get to him!","panic"],"c_downR":["COMMAND","Ruiz is down! Rear barricade! Somebody get to him!","panic"],"c_downH":["COMMAND","Holt is down! Front barricade! Get to her, get to her!","panic"],"c_downO":["COMMAND","Okafor is down! Rear barricade! Somebody get to him!","panic"],"c_towerFL":["COMMAND","Front left tower is dry. That pad's done.","grim"],"c_towerFR":["COMMAND","Front right tower is dry. That pad's done.","grim"],"c_towerRL":["COMMAND","Rear left tower is dry. That pad's done.","grim"],"c_towerRR":["COMMAND","Rear right tower is dry. That pad's done.","grim"],"c_arty":["COMMAND","Fire mission confirmed! Shells inbound, heads down, heads down!","urgent"],"c_napalm":["COMMAND","Napalm run on your mark! Stay off that road!","urgent"],"c_gunship":["COMMAND","Gunship on station. Engaging your target.","calm"],"c_orbital":["COMMAND","Orbital strike authorised. Charging... brace yourselves.","calm"],"c_airready":["COMMAND","Air support is standing by. Call it in when you need it.","calm"],"c_overrun":["COMMAND","We have lost the post... All units, fall back. Fall back.","grim"],"c_down":["COMMAND","Trooper down at CP-7... No response. No response.","grim"],"k_hit":["KESSLER","Argh! I'm hit! I'm hit! Get over here!","pain"],"k_thanks":["KESSLER","Thanks... thanks. Okay. Back in it.","relief"],"k_breach":["KESSLER","They're over the wall! They're over the front wall!","panic"],"k_reload":["KESSLER","Reloading! Cover me, cover me!","urgent"],"k_front":["KESSLER","Front road is black with them! Black with them!","panic"],"k_where":["KESSLER","Where are they all coming from?! Where?!","panic"],"k_help":["KESSLER","Hold on! I'm coming to you! Hold on!","urgent"],"k_cry1":["KESSLER","Die, alien scum!","shout"],"k_cry2":["KESSLER","Come on, you ugly bugs! Come get some!","shout"],"k_cry3":["KESSLER","Eat lead, bug!","shout"],"k_cry4":["KESSLER","Is that all you've got?!","shout"],"k_joke1":["KESSLER","Somebody call pest control. Oh wait... that's us.","joke"],"k_joke2":["KESSLER","Ten bucks says I get more than you, Ruiz!","joke"],"k_joke3":["KESSLER","Note to self. Never... volunteer... again.","joke"],"k_joke4":["KESSLER","I've seen bigger bugs in my mum's kitchen. No I haven't.","joke"],"r_hit":["RUIZ","Ah! Man down! Man down! Get over here!","pain"],"r_thanks":["RUIZ","Thanks, man... I owe you one. I owe you one.","relief"],"r_breach":["RUIZ","Breach at the back! Breach! I need you here!","panic"],"r_reload":["RUIZ","Changing mags! Changing mags!","urgent"],"r_rear":["RUIZ","Rear barricade, they just keep coming! They keep coming!","panic"],"r_holes":["RUIZ","More out of the holes! Watch the back! Watch the back!","panic"],"r_help":["RUIZ","Stay with me! I'm on my way! Stay with me!","urgent"],"r_cry1":["RUIZ","Die, alien scum!","shout"],"r_cry2":["RUIZ","Hasta la vista, bug!","shout"],"r_cry3":["RUIZ","Not today, bug! Not today!","shout"],"r_cry4":["RUIZ","Keep them coming! I've got plenty!","shout"],"r_joke1":["RUIZ","You owe me ten bucks, Kessler. I'm counting.","joke"],"r_joke2":["RUIZ","I joined for the free travel. Nobody said anything about bugs.","joke"],"r_joke3":["RUIZ","Is it just me, or are they getting uglier?","joke"],"r_joke4":["RUIZ","I'm going to need a really, really big can of bug spray.","joke"],"h_hit":["HOLT","Agh! I'm hit! I need a hand here! Now!","pain"],"h_thanks":["HOLT","Thanks... I owe you a drink. Okay. Okay.","relief"],"h_reload":["HOLT","Reloading! Reloading!","urgent"],"h_help":["HOLT","Hang on, I've got you! Don't you dare quit on me!","urgent"],"h_cry1":["HOLT","Die, alien scum!","shout"],"h_cry2":["HOLT","Back in your hole, bug!","shout"],"h_cry3":["HOLT","Who ordered the extra crispy?!","shout"],"h_cry4":["HOLT","Come on then! Next!","shout"],"h_joke1":["HOLT","My mum wanted me to be a dentist. Look at all these teeth.","joke"],"h_joke2":["HOLT","Kessler, step on my foot one more time and I am feeding you to them.","joke"],"h_joke3":["HOLT","Anyone else smell burnt bug? Just me?","joke"],"h_joke4":["HOLT","Remind me to put in for a transfer. Somewhere with fewer legs.","joke"],"o_hit":["OKAFOR","Argh! I'm down! I'm down! Somebody get over here!","pain"],"o_thanks":["OKAFOR","Cheers... cheers. Back on the line.","relief"],"o_reload":["OKAFOR","Changing magazines! Cover!","urgent"],"o_help":["OKAFOR","Hold on, brother! I'm coming! Hold on!","urgent"],"o_cry1":["OKAFOR","Die, alien scum!","shout"],"o_cry2":["OKAFOR","Not one step further!","shout"],"o_cry3":["OKAFOR","Keep coming! I've got all night!","shout"],"o_cry4":["OKAFOR","Say goodnight, bug!","shout"],"o_joke1":["OKAFOR","Ruiz, you still owe me for breakfast.","joke"],"o_joke2":["OKAFOR","They told me this was a quiet posting. They lied.","joke"],"o_joke3":["OKAFOR","If I survive this, I am retiring to a planet with no bugs. Any planet.","joke"],"o_joke4":["OKAFOR","Somebody tell the brass we need a bigger fly swatter.","joke"],"c_fliers":["COMMAND","Airborne contacts! Spitters coming in over the walls, they'll go for the post. Shoot them down!","urgent"]};
 const Snd = {
   ac: null, out: null, sfx: null, vox: null, revIn: null, noise: null, muted: false, last: {}, buf: {}, groups: {}, loops: {}, raw: null, ready: false, duckT: 0,
   active: 0, cats: {}, maxVoices: coarseMQ.matches ? 18 : 30, CAPS: { gun: 3, squad: 2, bug: 4, boom: 4, hit: 2, fx: 4, amb: 3, wave: 2, war: 2 },
@@ -7129,7 +7322,7 @@ const Snd = {
   tick(dt) { if (this.duckT > 0) { this.duckT -= dt; if (this.duckT <= 0 && this.sfx) this.sfx.gain.setTargetAtTime(1, this.ac.currentTime, 0.25); } },
   startBeds() {
     if (!this.ac || this.loops.wind) return;
-    for (const [n, v] of [['wind', 0.14], ['swarm', 0], ['fire', 0], ['spin', 0]]) {
+    for (const [n, v] of [['wind', 0.14], ['swarm', 0], ['fire', 0], ['spin', 0], ['buzz', 0]]) {
       const b = this.buf[n]; if (!b) continue;
       const src = this.ac.createBufferSource(); src.buffer = b; src.loop = true;
       const g = this.ac.createGain(); g.gain.value = v; src.connect(g); g.connect(this.sfx); src.start();
@@ -7205,6 +7398,7 @@ function placeSquad(m) {
 }
 function resetGame() {
   for (const b of bugs) b.dead = true;
+  globs = [];
   bugs = [];
   fxAdd.clear(); fxAlpha.clear(); fxSmoke.clear(); fxFire.clear();
   for (const d of splatDecals) d.clear(); scorchDecals.clear(); bloodDecals.clear();
@@ -7276,8 +7470,9 @@ const WAVE_VO = ['c_wave1', 'k_front', 'r_rear', 'c_wave2', 'k_where', 'r_holes'
 // ======================= waves =======================
 function startWave(n) {
   waveN = n; wcfg = { hp: 3 + Math.max(0, n - 3) * 0.25, spd: 4.7 + Math.min(n, 8) * 0.17 };
-  spawnQ = 90 + (n - 1) * 14; surge = 12 + n * 2; spawnT = 1.0; between = false; climbWarned = false; countShown = 0;
+  spawnQ = 90 + (n - 1) * 14; surge = 12 + n * 2; spawnT = 1.0; between = false; climbWarned = false; countShown = 0; flyWarned = flyWarned && n > 4;
   waveAliveCap = Math.min(ALIVE_CAP, 42 + n * 5); waveTime = 0;
+  flyQ = n >= 4 ? Math.min(14, 2 + (n - 4) * 2) : 0;
   if (mode === 'play') {
     banner('BOTH ENDS', 'WAVE ' + n); say(WAVE_VO[(n - 1) % WAVE_VO.length]);
     Snd.play('siren', { v: 0.4, exact: true, cat: 'wave' }); Snd.play('horde', { v: 0.6, delay: 2.4, cat: 'wave' }); launchFlare(0, 1); launchFlare(1, -1); flareT = 20;
@@ -7296,7 +7491,10 @@ function updateWaves(dt) {
       const ramp = clamp(waveTime / 30, 0, 1);
       const side = Math.random() < 0.5 ? -1 : 1, burst = 1 + ((Math.random() * (2 + ramp * 4)) | 0);
       let made = 0;
-      for (let i = 0; i < burst && spawnQ > 0; i++) if (spawnBug(spawnMix(), side)) { made++; spawnQ--; }
+      for (let i = 0; i < burst && spawnQ > 0; i++) {
+        const fly = flyQ > 0 && waveTime > 12 && Math.random() < 0.22;
+        if (spawnBug(fly ? 'fly' : spawnMix(), side)) { made++; spawnQ--; if (fly) flyQ--; }
+      }
       spawnT = lerp(1.1, Math.max(0.32, 0.72 - waveN * 0.03), ramp) * (made ? 1 : 0.5);
     }
   } else if (alive === 0) {
@@ -7305,7 +7503,7 @@ function updateWaves(dt) {
       const bonus = 100 + 40 * waveN; earn(bonus);
       POST.hp = Math.min(POST.max, POST.hp + POST.max * 0.15);
       banner('WAVE ' + waveN + ' \u00b7 +' + bonus + ' SUPPLY', 'CLEARED');
-      say('c_clear');
+      Snd.play('fanfare', { v: 1, exact: true, cat: 'wave' }); setTimeout(() => { if (mode === 'play') say('c_clear'); }, 6400);
       shopAuto = 1.6; if (targeting) cancelTarget();
     } else {
       breakT -= dt;
@@ -7321,7 +7519,7 @@ function updateWaves(dt) {
 // ======================= combat =======================
 const HIT_OFF = [0.72, 0, -0.74], HIT_R = [0.48, 0.34, 0.48];
 function rayBugHit(b, ox, oy, oz, dx, dy, dz, grow) {
-  const cy = b.y + STAND * b.k + b.lh; let best = null;
+  const cy = b.y + (b.fly ? 0 : STAND * b.k) + b.lh; let best = null;
   for (let s = 0; s < 3; s++) {
     const off = HIT_OFF[s], cx = b.x + Math.cos(b.h) * off * b.k, cz = b.z + Math.sin(b.h) * off * b.k;
     const r = HIT_R[s] * b.k * grow;
@@ -7387,11 +7585,11 @@ function startReload(s, isPlayer) {
   s.reloadT = s.shotgun ? 2.2 : 1.6; s.reloadMax = s.reloadT;
   if (isPlayer) Snd.click();
 }
-function hurtTarget(t, b) {
+function hurtTarget(t, b, dmg) {
   if (mode === 'title') return;
   if (!t) {
     if (POST.hp <= 0) return;
-    POST.hp = Math.max(0, POST.hp - 1.4);
+    POST.hp = Math.max(0, POST.hp - (dmg || 1.4));
     const a = Math.atan2(b.z - POST.z, b.x - POST.x), ex = POST.x + Math.cos(a) * BUNKER_R, ez = POST.z + Math.sin(a) * BUNKER_R;
     for (let i = 0; i < 4; i++) part(fxAdd, { x: ex, y: rand(0.4, 1.4), z: ez, vx: Math.cos(a) * rand(1, 4) + rand(-2, 2), vy: rand(1, 4), vz: Math.sin(a) * rand(1, 4) + rand(-2, 2), g: 12, drag: 1, life: rand(0.2, 0.4), r: 1, gg: 0.6, b: 0.25, a: 1, s0: 0.04, s1: 0.01 });
     Snd.at('bite', ex, ez, { v: 0.4, cat: 'bug', key: 'pb', gap: 0.25, rate: 0.8 });
@@ -7401,7 +7599,7 @@ function hurtTarget(t, b) {
     return;
   }
   if (!t.alive || t.state !== 'ok') return;
-  t.hp -= t === player ? 5 : 4.5; t.sinceHit = 0;
+  t.hp -= dmg || (t === player ? 5 : 4.5); t.sinceHit = 0;
   if (t === player) {
     dmgFlash = 1; Snd.play('hurt', { v: 0.6, key: 'hu', gap: 0.5 }); buzz(30); shake = Math.max(shake, 0.25);
     const rel = angDiff(Math.atan2(-(b.x - player.x), -(b.z - player.z)), player.yaw);
@@ -7491,7 +7689,7 @@ function explode(x, y, z, o = {}) {
   const R = o.r || 6.5, K = o.kill || 3.5, D = o.dmg || 3;
   for (const b of bugs) {
     if (b.dead) continue;
-    const d = Math.hypot(b.x - x, b.z - z);
+    const d = Math.hypot(b.x - x, b.z - z, b.fly ? (b.y - y) * 0.7 : 0);
     if (d > R) continue;
     const dx = (b.x - x) / (d || 1), dz = (b.z - z) / (d || 1);
     b.vx += dx * 9 * (1 - d / R); b.vz += dz * 9 * (1 - d / R);
@@ -7562,7 +7760,7 @@ function updateThrowables(dt) {
     const blink = m.arm > 0 ? Math.sin(clock * 30) > 0 : Math.sin(clock * 6) > 0.6;
     m.mesh.children[m.mesh.children.length - 1].visible = blink;
     let boom = false;
-    if (m.arm <= 0) for (const b of bugs) { if (!b.dead && b.em >= 1 && Math.hypot(b.x - m.x, b.z - m.z) < 2.3) { boom = true; break; } }
+    if (m.arm <= 0) for (const b of bugs) { if (!b.dead && !b.fly && b.em >= 1 && Math.hypot(b.x - m.x, b.z - m.z) < 2.3) { boom = true; break; } }
     if (boom) { disposeObj(m.mesh); explode(m.x, m.y, m.z, { r: 5.5, kill: 3 }); } else mines[j++] = m;
   }
   mines.length = j;
@@ -7582,7 +7780,7 @@ function updateThrowables(dt) {
     }
     if (Math.random() < dt * 8 * fade) part(fxAdd, { x: f.x + rand(-f.r, f.r) * 0.7, y: terrainH(f.x, f.z) + 0.3, z: f.z + rand(-f.r, f.r) * 0.7, vx: rand(-0.8, 0.8), vy: rand(3, 6), vz: rand(-0.8, 0.8), drag: 0.6, life: rand(0.9, 1.6), r: 1, gg: 0.55, b: 0.18, a: 1, s0: 0.05, s1: 0.02 });
     if (Math.random() < dt * 3 * fade) part(fxSmoke, { x: f.x + rand(-f.r, f.r) * 0.6, y: terrainH(f.x, f.z) + 1.2, z: f.z + rand(-f.r, f.r) * 0.6, vx: rand(-0.3, 0.3), vy: rand(0.8, 1.6), vz: rand(-0.3, 0.3), drag: 0.3, life: rand(2, 3.5), r: 0.05, gg: 0.045, b: 0.04, a: 0.6, s0: 1, s1: 3.5, fin: 5 });
-    for (const b of bugs) { if (b.dead) continue; if (Math.hypot(b.x - f.x, b.z - f.z) < f.r) { b.hp -= f.dps * dt; if (Math.random() < dt * 4) b.flash = 0.05; if (b.hp <= 0) killBug(b, 0, 0); } }
+    for (const b of bugs) { if (b.dead || b.fly) continue; if (Math.hypot(b.x - f.x, b.z - f.z) < f.r) { b.hp -= f.dps * dt; if (Math.random() < dt * 4) b.flash = 0.05; if (b.hp <= 0) killBug(b, 0, 0); } }
     fires[j++] = f;
   }
   fires.length = j;
@@ -7702,7 +7900,7 @@ function towerFire(pd) {
   const ex = cx + _v3.x * tEnd, ey = cy + _v3.y * tEnd, ez = cz + _v3.z * tEnd;
   _v4.set(ex - muz.x, ey - muz.y, ez - muz.z); const dl = _v4.length() || 1; _v4.divideScalar(dl);
   const res = shoot(player, muz.x, muz.y, muz.z, _v4.x, _v4.y, _v4.z, dl + 0.5, true, 3, [1.8, 1.0, 0.4], pd.ammo % 2 === 0);
-  for (const b of bugs) { if (b.dead || b === res.b) continue; const d = Math.hypot(b.x - res.x, b.z - res.z); if (d < 1.5) damageBugAt(b, 1.5, (b.x - res.x) / (d || 1), (b.z - res.z) / (d || 1), b.x, b.y + 0.5, b.z); }
+  for (const b of bugs) { if (b.dead || b === res.b) continue; const d = Math.hypot(b.x - res.x, b.z - res.z, b.fly ? b.y - res.y : 0); if (d < 1.5) damageBugAt(b, 1.5, (b.x - res.x) / (d || 1), (b.z - res.z) / (d || 1), b.x, b.y + 0.5, b.z); }
   for (let i = 0; i < 5; i++) part(fxAdd, { x: res.x, y: res.y + 0.1, z: res.z, vx: rand(-4, 4), vy: rand(1, 5), vz: rand(-4, 4), g: 14, drag: 1.4, life: rand(0.15, 0.35), r: 1, gg: 0.6, b: 0.2, a: 1, s0: 0.06, s1: 0.01 });
   pd.flash.position.set(pd.alt ? 0.1 : -0.1, 0, -1.32); flashOn(pd.flash); pd.flashT = 0.04;
   muzzleLight.position.copy(muz); muzzleLight.intensity = 8; muzzleLight.color.setRGB(1, 0.62, 0.35); muzzleLight.userData.t = 0.05;
@@ -7908,8 +8106,8 @@ function damageArc(angle) { const el = dmgEls[dmgI++ % dmgEls.length]; el.style.
 
 // ======================= updates =======================
 const keys = new Set();
-const look = { id: null, x: 0, y: 0 };
-const move = { id: null, ox: 0, oy: 0, dx: 0, dy: 0 };
+const look = { id: null, x: 0, y: 0, at: 0 };
+const move = { id: null, ox: 0, oy: 0, dx: 0, dy: 0, at: 0 };
 const fireHold = { id: null, x: 0, y: 0, on: false };
 let mouseDown = false, locked = false, usingTouch = false;
 const STICK_R = 56;
@@ -7924,7 +8122,7 @@ function pickTarget(b) {
 const SEP_CELL = 3, sepGrid = new Map();
 function updateBugs(dt) {
   sepGrid.clear();
-  for (const o of bugs) { if (o.dead || o.em < 1) continue; const key = Math.floor(o.z / SEP_CELL) * 4096 + Math.floor(o.x / SEP_CELL); const c = sepGrid.get(key); if (c) c.push(o); else sepGrid.set(key, [o]); }
+  for (const o of bugs) { if (o.dead || o.em < 1 || o.fly) continue; const key = Math.floor(o.z / SEP_CELL) * 4096 + Math.floor(o.x / SEP_CELL); const c = sepGrid.get(key); if (c) c.push(o); else sepGrid.set(key, [o]); }
   const blockers = [player, ...squad];
   for (const b of bugs) {
     if (b.dead) {
@@ -7937,6 +8135,7 @@ function updateBugs(dt) {
       if (b.y <= gy && b.deadT <= 3.5) { b.y = gy; b.vy = 0; }
       continue;
     }
+    if (b.fly) { updateFlier(b, dt); continue; }
     if (b.flash > 0) b.flash -= dt;
     if (b.em < 1) {
       b.em = Math.min(1, b.em + dt / 1.1);
@@ -8005,6 +8204,11 @@ function updateBugs(dt) {
     if (b.lunge > 0) b.lunge -= dt;
   }
   bugs = bugs.filter((b) => !(b.dead && b.deadT > 5));
+  updateGlobs(dt);
+  // wing drone from the nearest flier
+  let fd = 1e9;
+  for (const b of bugs) if (b.fly && !b.dead) { const d = Math.hypot(b.x - camera.position.x, b.y - camera.position.y, b.z - camera.position.z); if (d < fd) fd = d; }
+  Snd.setLoop('buzz', fd < 40 ? clamp(1 - fd / 40, 0, 1) * 0.42 : 0, 0.25, fd < 40 ? 0.9 + clamp(1 - fd / 40, 0, 1) * 0.3 : 1);
 }
 function readMove() {
   let mx = 0, my = 0;
@@ -8020,7 +8224,7 @@ function readMove() {
 }
 function aimAssist(p, onT, dt, walk = 0) {
   if (!onT || !usingTouch || reduceMotion || targeting) return;
-  const b = onT.b, ty = b.y + STAND * b.k;
+  const b = onT.b, ty = b.y + (b.fly ? 0 : STAND * b.k);
   const wantYaw = Math.atan2(-(b.x - camera.position.x), -(b.z - camera.position.z));
   const wantPitch = Math.atan2(ty - camera.position.y, Math.hypot(b.x - camera.position.x, b.z - camera.position.z));
   const k = Math.min(1, dt * 2.5) * (1 - 0.85 * Math.min(1, walk));
@@ -8172,7 +8376,7 @@ function updateSquad(dt) {
       for (const b of bugs) {
         if (b.dead || b.em < 0.6) continue;
         const d = Math.hypot(b.x - m.x, b.z - m.z); if (d > m.range) continue;
-        const s = d + (Math.sign(b.z) === Math.sign(m.z) ? 0 : 12) - (Math.abs(b.z) < BAR_Z ? 6 : 0);
+        const s = d + (Math.sign(b.z) === Math.sign(m.z) ? 0 : 12) - (Math.abs(b.z) < BAR_Z ? 6 : 0) - (b.fly ? 9 : 0);
         if (s < bs) { bs = s; bestB = b; }
       }
       m.tgt = bestB;
@@ -8181,7 +8385,7 @@ function updateSquad(dt) {
     let want = m.homeYaw, wantP = 0, ok = false;
     if (m.tgt) {
       const b = m.tgt; want = Math.atan2(b.x - m.x, b.z - m.z);
-      wantP = Math.atan2(b.y + STAND * b.k - (terrainH(m.x, m.z) + 1.4), Math.hypot(b.x - m.x, b.z - m.z));
+      wantP = Math.atan2(b.y + (b.fly ? 0 : STAND * b.k) - (terrainH(m.x, m.z) + 1.4), Math.hypot(b.x - m.x, b.z - m.z));
       ok = Math.abs(angDiff(m.yaw, want)) < 0.1;
     }
     m.yaw += clamp(angDiff(m.yaw, want), -4.5 * dt, 4.5 * dt);
@@ -8277,13 +8481,13 @@ function updateFx(dt) {
     for (const b of bugs) {
       if (b.dead) continue;
       const d = Math.hypot(b.x - camera.position.x, b.z - camera.position.z);
-      if (d < 45) near++; if (d < 8) close++; if (d < 20 && b.em >= 1) stompN++;
-      if (Math.abs(b.z) < BAR_Z - 0.5 && Math.abs(b.x) < ROAD_HALF + 1) { if (b.z > 0) fIn++; else bIn++; }
+      if (d < 45) near++; if (d < 8 && !b.fly) close++; if (d < 20 && b.em >= 1 && !b.fly) stompN++;
+      if (!b.fly && Math.abs(b.z) < BAR_Z - 0.5 && Math.abs(b.x) < ROAD_HALF + 1) { if (b.z > 0) fIn++; else bIn++; }
     }
     nearCount = near; Snd.setSwarm(mode === 'title' ? 0 : clamp(near / 40, 0, 1));
     if (mode === 'play') {
       // ground thumps from the pack closing in, and roars from further out
-      if (stompN && Math.random() < Math.min(0.95, stompN * 0.12)) { const c = bugs.filter((b) => !b.dead && Math.hypot(b.x - camera.position.x, b.z - camera.position.z) < 20); const b = c[(Math.random() * c.length) | 0]; if (b) Snd.at('stomp', b.x, b.z, { v: 0.55, cat: 'amb', range: 30, rate: 1.4 / (b.k + 0.1), key: 'stp', gap: 0.3 }); }
+      if (stompN && Math.random() < Math.min(0.95, stompN * 0.12)) { const c = bugs.filter((b) => !b.dead && !b.fly && Math.hypot(b.x - camera.position.x, b.z - camera.position.z) < 20); const b = c[(Math.random() * c.length) | 0]; if (b) Snd.at('stomp', b.x, b.z, { v: 0.55, cat: 'amb', range: 30, rate: 1.4 / (b.k + 0.1), key: 'stp', gap: 0.3 }); }
       if (near > 4 && Math.random() < 0.025) { const c = bugs.filter((b) => !b.dead && b.em >= 1); const b = c[(Math.random() * c.length) | 0]; if (b) Snd.at('roar', b.x, b.z, { v: 0.6, cat: 'amb', range: 100, rate: 1.4 / (b.k + 0.1), key: 'ro', gap: 6, rev: 0.25 }); }
     }
     if (close >= 6 && mode === 'play') shake = Math.max(shake, 0.14);
@@ -8431,6 +8635,7 @@ function drawRadar() {
     if (b.dead) continue;
     const d = Math.hypot(b.x - player.x, b.z - player.z); if (d > range) continue;
     const [x, y] = toR(b.x, b.z);
+    if (b.fly) { rctx.strokeStyle = `rgba(120,255,190,${0.6 + 0.4 * Math.sin(clock * 8 + b.phase)})`; rctx.lineWidth = 1.5; rctx.beginPath(); rctx.arc(x, y, 4, 0, TAU); rctx.stroke(); continue; }
     rctx.fillStyle = `rgba(255,90,60,${0.55 + 0.45 * Math.sin(clock * 8 + b.phase)})`; rctx.beginPath(); rctx.arc(x, y, 3.5, 0, TAU); rctx.fill();
   }
   rctx.fillStyle = '#e8e2d4'; rctx.beginPath(); rctx.moveTo(R, R - 7); rctx.lineTo(R - 5, R + 5); rctx.lineTo(R + 5, R + 5); rctx.closePath(); rctx.fill();
@@ -8562,8 +8767,12 @@ canvas.addEventListener('pointerdown', (e) => {
   }
   usingTouch = true; e.preventDefault();
   if (mode !== 'play') return;
-  if (e.clientX < W * 0.42) { if (move.id === null) { move.id = e.pointerId; move.ox = e.clientX; move.oy = e.clientY; move.dx = 0; move.dy = 0; } }
-  else if (look.id === null) { look.id = e.pointerId; look.x = e.clientX; look.y = e.clientY; look.t = e.timeStamp; }
+  // a stick whose finger we lost track of (its up/cancel never reached us) would otherwise walk the player
+  // forever and refuse every new touch: any pointer we have not heard from for a moment hands over
+  if (move.id !== null && (move.id === e.pointerId || e.timeStamp - move.at > 500)) move.id = null;
+  if (look.id !== null && (look.id === e.pointerId || e.timeStamp - look.at > 500)) look.id = null;
+  if (e.clientX < W * 0.42) { if (move.id === null) { move.id = e.pointerId; move.ox = e.clientX; move.oy = e.clientY; move.dx = 0; move.dy = 0; move.at = e.timeStamp; } }
+  else if (look.id === null) { look.id = e.pointerId; look.x = e.clientX; look.y = e.clientY; look.t = e.timeStamp; look.at = e.timeStamp; }
   try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
 }, { passive: false });
 canvas.addEventListener('pointermove', (e) => {
@@ -8573,17 +8782,23 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
   if (e.pointerId === move.id) {
+    move.at = e.timeStamp;
     let dx = e.clientX - move.ox, dy = e.clientY - move.oy; const d = Math.hypot(dx, dy);
     if (d > STICK_R) { const ex = d - STICK_R; move.ox += dx / d * ex; move.oy += dy / d * ex; dx = e.clientX - move.ox; dy = e.clientY - move.oy; }
     move.dx = dx / STICK_R; move.dy = dy / STICK_R;
-  } else if (e.pointerId === look.id) { const dx = e.clientX - look.x, dy = e.clientY - look.y, g = flickGain(look, e, dx, dy); applyLook(dx * g, dy * Math.min(g, 1.4)); look.x = e.clientX; look.y = e.clientY; }
+  } else if (e.pointerId === look.id) { look.at = e.timeStamp; const dx = e.clientX - look.x, dy = e.clientY - look.y, g = flickGain(look, e, dx, dy); applyLook(dx * g, dy * Math.min(g, 1.4)); look.x = e.clientX; look.y = e.clientY; }
 }, { passive: true });
 const endPtr = (e) => {
   if (e.pointerType === 'mouse') { if (e.button === 0) mouseDown = false; if (look.id === 'mouse') look.id = null; return; }
   if (e.pointerId === move.id) { move.id = null; move.dx = move.dy = 0; }
   if (e.pointerId === look.id) look.id = null;
 };
-canvas.addEventListener('pointerup', endPtr); canvas.addEventListener('pointercancel', endPtr);
+// ups are listened for on the window as well as the canvas: an overlay (shop, revive prompt) can appear under a
+// held finger and swallow the release, which used to leave the stick pushed and the player walking into a wall
+canvas.addEventListener('pointerup', endPtr); canvas.addEventListener('pointercancel', endPtr); canvas.addEventListener('lostpointercapture', endPtr);
+window.addEventListener('pointerup', endPtr, true); window.addEventListener('pointercancel', endPtr, true);
+window.addEventListener('touchcancel', () => { move.id = null; move.dx = move.dy = 0; look.id = null; fireHold.id = null; fireHold.on = false; fb.classList.remove('held'); }, true);
+document.addEventListener('visibilitychange', () => { if (document.hidden) { keys.clear(); mouseDown = false; move.id = null; move.dx = move.dy = 0; look.id = null; fireHold.id = null; fireHold.on = false; fb.classList.remove('held'); } });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 window.addEventListener('mouseup', () => { mouseDown = false; if (look.id === 'mouse') look.id = null; });
 document.addEventListener('pointerlockchange', () => { locked = document.pointerLockElement === canvas; });
@@ -8591,7 +8806,8 @@ const fb = $('#fireBtn');
 fb.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); fireHold.id = e.pointerId; fireHold.on = true; fireHold.x = e.clientX; fireHold.y = e.clientY; fb.classList.add('held'); try { fb.setPointerCapture(e.pointerId); } catch (err) { /* synthetic */ } });
 fb.addEventListener('pointermove', (e) => { if (e.pointerId !== fireHold.id) return; const dx = e.clientX - fireHold.x, dy = e.clientY - fireHold.y, g = flickGain(fireHold, e, dx, dy); applyLook(dx * g, dy * Math.min(g, 1.4)); fireHold.x = e.clientX; fireHold.y = e.clientY; });
 const fbEnd = (e) => { if (e.pointerId !== fireHold.id) return; fireHold.id = null; fireHold.on = false; fb.classList.remove('held'); };
-fb.addEventListener('pointerup', fbEnd); fb.addEventListener('pointercancel', fbEnd);
+fb.addEventListener('pointerup', fbEnd); fb.addEventListener('pointercancel', fbEnd); fb.addEventListener('lostpointercapture', fbEnd);
+window.addEventListener('pointerup', fbEnd, true); window.addEventListener('pointercancel', fbEnd, true);
 window.addEventListener('keydown', (e) => {
   if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
   keys.add(e.code);
@@ -8612,7 +8828,7 @@ window.addEventListener('keydown', (e) => {
   }
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
-window.addEventListener('blur', () => { keys.clear(); mouseDown = false; move.id = null; look.id = null; fireHold.on = false; });
+window.addEventListener('blur', () => { keys.clear(); mouseDown = false; move.id = null; move.dx = move.dy = 0; look.id = null; fireHold.id = null; fireHold.on = false; fb.classList.remove('held'); });
 const tapBtn = (el, fn) => {
   el.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); fn(); });
   el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } });
